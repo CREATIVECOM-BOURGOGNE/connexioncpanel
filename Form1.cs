@@ -1,528 +1,572 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
-using System.Net.Http;
+using System.Net;
+using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
-using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace ConnexionCpanel
 {
     public partial class Form1 : Form
     {
-        private List<Account> _accounts = new List<Account>();
-        private AccountManager _accountManager;
-        private readonly string _masterPassword;
-
-        public Form1(string masterPassword)
+        private class Account
         {
-            _masterPassword = masterPassword ?? throw new ArgumentNullException(nameof(masterPassword));
+            public string Client { get; set; } = "";
+            public string Url { get; set; } = "";
+            public string Username { get; set; } = "";
+            public string Password { get; set; } = "";
+            public string ApiToken { get; set; } = "";
+        }
+
+        private TextBox txtClient, txtUrl, txtUser, txtPass, txtToken;
+        private DataGridView dgv;
+        private Button btnAdd, btnUpdate, btnDelete, btnTest;
+        private List<Account> accounts = new();
+        private string? masterPassword;
+        private readonly string dataPath;
+
+        private readonly Color ConnectButtonColor = Color.FromArgb(229, 57, 53); // #E53935
+        private readonly Color ConnectTextColor = Color.White;
+
+        public Form1()
+        {
+            dataPath = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath) ?? ".", "accounts.dat");
             InitializeComponent();
-            CheckCompatibility();
-            LoadAccounts();
-            SetupDataGridView();
-            SetupEventHandlers();
 
-            this.Load += (s, e) =>
-            {
-                dgvAccounts.ClearSelection();
-                btnAdd.Visible = true;
-                btnSave.Visible = false;
-                btnUpdate.Visible = false;
-                UpdateButtonStates();
-            };
+            // ✅ Icône (à activer via Propriétés > Application > Icône)
+            // this.Icon = new Icon(Path.Combine(Application.StartupPath, "icone.ico"));
+
+            SetupUI();
+            LoadOrPromptPassword();
         }
 
-        private void CheckCompatibility()
+        private void SetupUI()
         {
-            var os = Environment.OSVersion;
-            if (os.Platform != PlatformID.Win32NT || os.Version < new Version(6, 1))
+            Font = new Font("Segoe UI", 9F);
+            MinimumSize = new Size(850, 500);
+
+            var inputPanel = new TableLayoutPanel { Dock = DockStyle.Top, Height = 120, RowCount = 2, ColumnCount = 3, Padding = new Padding(10) };
+            inputPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
+            inputPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
+            inputPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
+            inputPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+            inputPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 50F));
+
+            txtClient = new TextBox();
+            txtUrl = new TextBox();
+            txtUser = new TextBox();
+            txtPass = new TextBox { UseSystemPasswordChar = true };
+            txtToken = new TextBox();
+
+            // ✅ Interdiction des espaces (saisie + collage)
+            txtPass.KeyPress += (_, e) => { if (e.KeyChar == ' ') e.Handled = true; };
+            txtToken.KeyPress += (_, e) => { if (e.KeyChar == ' ') e.Handled = true; };
+            txtPass.TextChanged += (_, _) => txtPass.Text = txtPass.Text.Replace(" ", "");
+            txtToken.TextChanged += (_, _) => txtToken.Text = txtToken.Text.Replace(" ", "");
+
+            // ✅ Raccourci clavier Entrée
+            txtClient.KeyDown += (_, e) =>
             {
-                MessageBox.Show("Ce logiciel requiert Windows 7 ou supérieur.", "Incompatible", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                Environment.Exit(1);
-            }
-        }
-
-        private void LoadAccounts()
-        {
-            _accountManager = new AccountManager(_masterPassword);
-            _accounts = _accountManager.LoadAccounts();
-            _accounts.Sort((a, b) => string.Compare(a.Client, b.Client, StringComparison.OrdinalIgnoreCase));
-            dgvAccounts.DataSource = new BindingSource(_accounts, null);
-            dgvAccounts.ClearSelection();
-            UpdateButtonStates();
-        }
-
-        private void SetupDataGridView()
-        {
-            dgvAccounts.AutoGenerateColumns = false;
-            dgvAccounts.Columns.Clear();
-            dgvAccounts.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Client", DataPropertyName = "Client", Width = 120 });
-            dgvAccounts.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "URL", DataPropertyName = "CpanelUrl", AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill });
-            dgvAccounts.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Identifiant", DataPropertyName = "Username", Width = 100 });
-            dgvAccounts.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "Token API", DataPropertyName = "ApiToken", Width = 150 });
-
-            foreach (DataGridViewColumn col in dgvAccounts.Columns)
-            {
-                col.SortMode = DataGridViewColumnSortMode.NotSortable;
-            }
-
-            dgvAccounts.SelectionChanged += (s, e) => UpdateButtonStates();
-            dgvAccounts.CellDoubleClick += (s, e) => ConnectSelectedAccount();
-        }
-
-        private void SetupEventHandlers()
-        {
-            btnAdd.Click += (s, e) => PrepareAdd();
-            btnSave.Click += (s, e) => SaveNewAccount();
-            btnUpdate.Click += (s, e) => UpdateAccount();
-            btnEdit.Click += (s, e) => PrepareEdit();
-            btnDelete.Click += (s, e) => DeleteAccount();
-            btnTestToken.Click += async (s, e) => await TestApiTokenAsync();
-            btnConnect.Click += (s, e) => ConnectSelectedAccount();
-
-            foreach (var tb in new[] { txtUrl, txtPassword, txtApiToken })
-            {
-                tb.KeyPress += (s, e) =>
+                if (e.KeyCode == Keys.Enter)
                 {
-                    if (e.KeyChar == ' ')
-                    {
-                        e.Handled = true;
-                    }
-                };
-
-                tb.TextChanged += (s, e) =>
-                {
-                    string original = tb.Text;
-                    string cleaned = original.Replace(" ", "");
-                    if (original != cleaned)
-                    {
-                        int pos = tb.SelectionStart;
-                        tb.Text = cleaned;
-                        tb.SelectionStart = Math.Min(pos, cleaned.Length);
-                    }
-                };
-            }
-
-            txtUrl.Leave += (s, e) =>
-            {
-                string url = txtUrl.Text.Trim();
-                if (url.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
-                {
-                    txtUrl.Text = "https://" + url.Substring(7).TrimStart('/');
-                }
-            };
-        }
-
-        private void UpdateButtonStates()
-        {
-            var hasSelection = dgvAccounts.SelectedRows.Count > 0;
-            bool isAdding = btnSave.Visible;
-            bool isEditing = btnUpdate.Visible;
-
-            btnAdd.Visible = !isAdding && !isEditing;
-            btnSave.Visible = isAdding;
-            btnUpdate.Visible = isEditing;
-
-            bool interactive = !isAdding && !isEditing;
-            btnEdit.Enabled = hasSelection && interactive;
-            btnDelete.Enabled = hasSelection && interactive;
-            btnTestToken.Enabled = hasSelection && interactive;
-            btnConnect.Enabled = hasSelection && interactive;
-
-            if (hasSelection && interactive)
-            {
-                var acc = dgvAccounts.SelectedRows[0].DataBoundItem as Account;
-                if (acc != null)
-                {
-                    txtClient.Text = acc.Client;
-                    txtUrl.Text = acc.CpanelUrl;
-                    txtUsername.Text = acc.Username;
-                    txtPassword.Text = acc.Password;
-                    txtApiToken.Text = acc.ApiToken;
-                }
-            }
-        }
-
-        private void PrepareAdd()
-        {
-            ClearFields();
-            btnAdd.Visible = false;
-            btnSave.Visible = true;
-            btnUpdate.Visible = false;
-            btnEdit.Enabled = false;
-            btnDelete.Enabled = false;
-            btnTestToken.Enabled = false;
-            btnConnect.Enabled = false;
-        }
-
-        private void SaveNewAccount()
-        {
-            string client = txtClient.Text.Trim();
-            string url = txtUrl.Text;
-            string username = txtUsername.Text.Trim();
-            string password = txtPassword.Text;
-            string apiToken = txtApiToken.Text.Trim();
-
-            if (url.Contains(' ') || password.Contains(' ') || apiToken.Contains(' '))
-            {
-                MessageBox.Show("Les espaces sont interdits dans l'URL, le mot de passe et le jeton API.", "Caractère invalide", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            if (string.IsNullOrWhiteSpace(url))
-            {
-                MessageBox.Show("L'URL cPanel ne peut pas être vide.", "URL manquante", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            if (url.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
-            {
-                url = "https://" + url.Substring(7).TrimStart('/');
-            }
-            else if (!url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-            {
-                MessageBox.Show("L'URL cPanel doit commencer par 'https://' (ex: https://exemple.com:2083).", "URL invalide", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-            else
-            {
-                url = "https://" + url.Substring(8).TrimStart('/');
-            }
-
-            url = url.Replace(":///", "://").TrimEnd('/');
-
-            if (string.IsNullOrWhiteSpace(client) || string.IsNullOrWhiteSpace(username))
-            {
-                MessageBox.Show("Veuillez remplir au moins 'Client', 'URL' et 'Identifiant'.", "Validation", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            var acc = new Account
-            {
-                Client = client,
-                CpanelUrl = url,
-                Username = username,
-                Password = password,
-                ApiToken = apiToken
-            };
-
-            _accounts.Add(acc);
-
-            // ✅ APPEL OBLIGATOIRE
-            SaveAccounts();
-
-            btnAdd.Visible = true;
-            btnSave.Visible = false;
-            dgvAccounts.ClearSelection();
-            ClearFields();
-        }
-
-        private void PrepareEdit()
-        {
-            if (dgvAccounts.SelectedRows.Count == 0) return;
-            var acc = dgvAccounts.SelectedRows[0].DataBoundItem as Account;
-            if (acc == null) return;
-
-            txtClient.Text = acc.Client;
-            txtUrl.Text = acc.CpanelUrl;
-            txtUsername.Text = acc.Username;
-            txtPassword.Text = acc.Password;
-            txtApiToken.Text = acc.ApiToken;
-
-            btnAdd.Visible = false;
-            btnSave.Visible = false;
-            btnUpdate.Visible = true;
-            UpdateButtonStates();
-        }
-
-        private void UpdateAccount()
-        {
-            if (dgvAccounts.SelectedRows.Count == 0) return;
-            var acc = dgvAccounts.SelectedRows[0].DataBoundItem as Account;
-            if (acc == null) return;
-
-            string client = txtClient.Text.Trim();
-            string url = txtUrl.Text;
-            string username = txtUsername.Text.Trim();
-            string password = txtPassword.Text;
-            string apiToken = txtApiToken.Text.Trim();
-
-            if (url.Contains(' ') || password.Contains(' ') || apiToken.Contains(' '))
-            {
-                MessageBox.Show("Les espaces sont interdits dans l'URL, le mot de passe et le jeton API.", "Caractère invalide", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            if (string.IsNullOrWhiteSpace(url))
-            {
-                MessageBox.Show("L'URL cPanel ne peut pas être vide.", "URL manquante", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            if (url.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
-            {
-                url = "https://" + url.Substring(7).TrimStart('/');
-            }
-            else if (!url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-            {
-                MessageBox.Show("L'URL cPanel doit commencer par 'https://' (ex: https://exemple.com:2083).", "URL invalide", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-            else
-            {
-                url = "https://" + url.Substring(8).TrimStart('/');
-            }
-
-            url = url.Replace(":///", "://").TrimEnd('/');
-
-            if (string.IsNullOrWhiteSpace(client) || string.IsNullOrWhiteSpace(username))
-            {
-                MessageBox.Show("Veuillez remplir au moins 'Client', 'URL' et 'Identifiant'.", "Validation", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            acc.Client = client;
-            acc.CpanelUrl = url;
-            acc.Username = username;
-            acc.Password = password;
-            acc.ApiToken = apiToken;
-
-            // ✅ APPEL OBLIGATOIRE
-            SaveAccounts();
-
-            dgvAccounts.ClearSelection();
-            ClearFields();
-        }
-
-        private void DeleteAccount()
-        {
-            if (dgvAccounts.SelectedRows.Count == 0) return;
-            _accounts.RemoveAt(dgvAccounts.SelectedRows[0].Index);
-
-            // ✅ APPEL OBLIGATOIRE
-            SaveAccounts();
-        }
-
-        // ✅ MÉTHODE MANQUANTE AJOUTÉE ICI
-        private void SaveAccounts()
-        {
-            // Tri A→Z
-            _accounts.Sort((a, b) => string.Compare(a.Client, b.Client, StringComparison.OrdinalIgnoreCase));
-
-            // Sauvegarde via AccountManager
-            _accountManager.SaveAccounts(_accounts);
-
-            // Mise à jour de l'interface
-            string selectedKey = null;
-            if (dgvAccounts.SelectedRows.Count > 0)
-            {
-                var selectedAcc = dgvAccounts.SelectedRows[0].DataBoundItem as Account;
-                if (selectedAcc != null)
-                    selectedKey = $"{selectedAcc.Client}||{selectedAcc.CpanelUrl}||{selectedAcc.Username}";
-            }
-
-            dgvAccounts.DataSource = new BindingSource(_accounts, null);
-            UpdateButtonStates();
-
-            // Restauration de la sélection
-            if (!string.IsNullOrEmpty(selectedKey))
-            {
-                for (int i = 0; i < dgvAccounts.Rows.Count; i++)
-                {
-                    var acc = dgvAccounts.Rows[i].DataBoundItem as Account;
-                    if (acc != null && $"{acc.Client}||{acc.CpanelUrl}||{acc.Username}" == selectedKey)
-                    {
-                        dgvAccounts.ClearSelection();
-                        dgvAccounts.Rows[i].Selected = true;
-                        break;
-                    }
-                }
-            }
-        }
-
-        private void ClearFields()
-        {
-            txtClient.Clear();
-            txtUrl.Clear();
-            txtUsername.Clear();
-            txtPassword.Clear();
-            txtApiToken.Clear();
-            dgvAccounts.ClearSelection();
-            UpdateButtonStates();
-        }
-
-        private async Task TestApiTokenAsync()
-        {
-            if (dgvAccounts.SelectedRows.Count == 0) return;
-            var acc = dgvAccounts.SelectedRows[0].DataBoundItem as Account;
-            if (string.IsNullOrWhiteSpace(acc?.ApiToken))
-            {
-                MessageBox.Show("Aucun jeton API fourni.", "Erreur", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            try
-            {
-                using (var client = new HttpClient())
-                {
-                    client.DefaultRequestHeaders.Add("Authorization", $"cpanel {acc.Username}:{acc.ApiToken}");
-                    var endpoint = $"{acc.CpanelUrl.TrimEnd('/')}/execute/SSL/get_csr_domains";
-                    var response = await client.GetAsync(endpoint);
-
-                    if (response.IsSuccessStatusCode)
-                        MessageBox.Show("✅ Jeton API valide.", "Succès", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    if (dgv.SelectedRows.Count > 0)
+                        UpdateSelected();
                     else
-                        MessageBox.Show($"❌ Échec : {response.StatusCode}", "Erreur", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        SaveNew();
+                    e.SuppressKeyPress = true;
                 }
-            }
-            catch (Exception ex)
+            };
+
+            txtUrl.Leave += (_, _) => { if (!txtUrl.Text.Trim().StartsWith("https://")) MessageBox.Show("URL doit commencer par https://"); };
+            txtUrl.KeyPress += (_, e) => { if (e.KeyChar == ' ') e.Handled = true; };
+
+            inputPanel.Controls.Add(MakeGroup("Client", txtClient), 0, 0);
+            inputPanel.Controls.Add(MakeGroup("URL cPanel", txtUrl), 1, 0);
+            inputPanel.Controls.Add(MakeGroup("Identifiant", txtUser), 2, 0);
+            inputPanel.Controls.Add(MakeGroup("Mot de passe", txtPass), 0, 1);
+            inputPanel.Controls.Add(MakeGroup("Jeton API", txtToken), 1, 1);
+
+            dgv = new DataGridView
             {
-                MessageBox.Show($"Erreur de connexion : {ex.Message}", "Exception", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
+                Dock = DockStyle.Fill,
+                AutoGenerateColumns = false,
+                AllowUserToAddRows = false,
+                RowHeadersVisible = false,
+                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                MultiSelect = false,
+                Font = new Font("Segoe UI", 8.5F),
+                RowTemplate = { Height = 28 }
+            };
+
+            dgv.Columns.Add(new DataGridViewTextBoxColumn { Name = "Client", HeaderText = "Client", DataPropertyName = "Client" });
+            dgv.Columns.Add(new DataGridViewTextBoxColumn { Name = "Url", HeaderText = "URL", DataPropertyName = "Url" });
+            dgv.Columns.Add(new DataGridViewTextBoxColumn { Name = "Username", HeaderText = "Identifiant", DataPropertyName = "Username" });
+            var passCol = new DataGridViewTextBoxColumn { Name = "Password", HeaderText = "Mot de passe", DataPropertyName = "Password" };
+            dgv.Columns.Add(passCol);
+            dgv.Columns.Add(new DataGridViewTextBoxColumn { Name = "ApiToken", HeaderText = "Jeton", DataPropertyName = "ApiToken" });
+
+            var btnCol = new DataGridViewButtonColumn
+            {
+                Name = "Connect",
+                HeaderText = "",
+                UseColumnTextForButtonValue = false,
+                Width = 68
+            };
+            dgv.Columns.Add(btnCol);
+
+            dgv.CellFormatting += (_, e) =>
+            {
+                if (e.ColumnIndex == dgv.Columns["Password"].Index && e.Value != null)
+                    e.Value = new string('*', e.Value.ToString().Length);
+            };
+
+            dgv.CellClick += (s, e) =>
+            {
+                if (e.ColumnIndex == dgv.Columns["Connect"].Index && e.RowIndex >= 0)
+                {
+                    var account = accounts[e.RowIndex];
+                    ConnectToAccount(account);
+                }
+            };
+
+            dgv.CellPainting += (s, e) =>
+            {
+                if (e.ColumnIndex == dgv.Columns["Connect"].Index && e.RowIndex >= 0)
+                {
+                    e.PaintBackground(e.ClipBounds, true);
+                    var rect = new Rectangle(
+                        e.CellBounds.X + 6,
+                        e.CellBounds.Y + 4,
+                        e.CellBounds.Width - 12,
+                        e.CellBounds.Height - 8
+                    );
+
+                    using (var path = RoundedRectangle(rect, 4))
+                    using (var brush = new SolidBrush(ConnectButtonColor))
+                    using (var pen = new Pen(Color.FromArgb(210, 30, 20), 1))
+                    {
+                        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                        e.Graphics.FillPath(brush, path);
+                        e.Graphics.DrawPath(pen, path);
+                    }
+
+                    using (var font = new Font("Segoe UI Semibold", 9.5F))
+                    using (var brush = new SolidBrush(ConnectTextColor))
+                    {
+                        string text = "Conn. →";
+                        var size = e.Graphics.MeasureString(text, font);
+                        float x = rect.X + (rect.Width - size.Width) / 2;
+                        float y = rect.Y + (rect.Height - size.Height) / 2 - 1;
+                        e.Graphics.DrawString(text, font, brush, x, y);
+                    }
+
+                    e.Handled = true;
+                }
+            };
+
+            dgv.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+            dgv.Columns["Connect"].AutoSizeMode = DataGridViewAutoSizeColumnMode.None;
+            dgv.Columns["Connect"].Width = 68;
+
+            var btnPanel = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 40, Padding = new Padding(10, 5, 10, 5) };
+
+            btnAdd = new Button { Text = "➕ Ajouter", Width = 100 };
+            btnUpdate = new Button { Text = "✏️ Modifier", Width = 100, Enabled = false };
+            btnDelete = new Button { Text = "🗑️ Supprimer", Width = 100, Enabled = false };
+            btnTest = new Button { Text = "🔍 Tester jeton", Width = 120, Enabled = false };
+
+            btnAdd.Click += (_, _) => SaveNew();
+            btnUpdate.Click += (_, _) => UpdateSelected();
+            btnDelete.Click += (_, _) => DeleteSelected();
+            btnTest.Click += (_, _) => TestToken();
+
+            foreach (var b in new[] { btnAdd, btnUpdate, btnDelete, btnTest })
+                btnPanel.Controls.Add(b);
+
+            // ✅ SelectionChanged corrigé : remplissage automatique
+            dgv.SelectionChanged += (_, _) =>
+            {
+                bool hasSelection = dgv.SelectedRows.Count > 0;
+                btnUpdate.Enabled = btnDelete.Enabled = btnTest.Enabled = hasSelection;
+
+                if (hasSelection)
+                {
+                    var row = dgv.SelectedRows[0];
+                    txtClient.Text = row.Cells["Client"].Value?.ToString() ?? "";
+                    txtUrl.Text = row.Cells["Url"].Value?.ToString() ?? "";
+                    txtUser.Text = row.Cells["Username"].Value?.ToString() ?? "";
+                    txtPass.Text = row.Cells["Password"].Value?.ToString() ?? "";
+                    txtToken.Text = row.Cells["ApiToken"].Value?.ToString() ?? "";
+                }
+                else
+                {
+                    Clear();
+                }
+            };
+
+            var mainLayout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, ColumnCount = 1 };
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100F));
+            mainLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            mainLayout.Controls.Add(inputPanel, 0, 0);
+            mainLayout.Controls.Add(dgv, 0, 1);
+            mainLayout.Controls.Add(btnPanel, 0, 2);
+
+            Controls.Add(mainLayout);
         }
 
-        private void ConnectSelectedAccount()
+        private GraphicsPath RoundedRectangle(Rectangle bounds, int radius)
         {
-            if (dgvAccounts.SelectedRows.Count == 0) return;
-            var acc = dgvAccounts.SelectedRows[0].DataBoundItem as Account;
-            if (acc == null) return;
+            var path = new GraphicsPath();
+            if (radius <= 0) { path.AddRectangle(bounds); return path; }
+            path.AddArc(bounds.X, bounds.Y, radius, radius, 180, 90);
+            path.AddArc(bounds.X + bounds.Width - radius, bounds.Y, radius, radius, 270, 90);
+            path.AddArc(bounds.X + bounds.Width - radius, bounds.Y + bounds.Height - radius, radius, radius, 0, 90);
+            path.AddArc(bounds.X, bounds.Y + bounds.Height - radius, radius, radius, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
 
-            if (acc.CpanelUrl.Contains("o2switch", StringComparison.OrdinalIgnoreCase))
+        private GroupBox MakeGroup(string text, Control ctrl)
+        {
+            var g = new GroupBox { Text = text, Padding = new Padding(3) };
+            ctrl.Dock = DockStyle.Fill;
+            g.Controls.Add(ctrl);
+            return g;
+        }
+
+        private void Clear() => Array.ForEach(new[] { txtClient, txtUrl, txtUser, txtPass, txtToken }, t => t.Text = "");
+
+        private void LoadOrPromptPassword()
+        {
+            int attempts = 0;
+            while (attempts < 3)
             {
-                if (string.IsNullOrWhiteSpace(acc.Username) || string.IsNullOrWhiteSpace(acc.Password))
-                {
-                    MessageBox.Show("Pour o2switch, l'identifiant et le mot de passe sont obligatoires.", "Données manquantes", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-
-                string token = !string.IsNullOrWhiteSpace(acc.ApiToken) ? acc.ApiToken : "";
-                string url = $"{acc.CpanelUrl.TrimEnd('/')}/login/?" +
-                             $"user={Uri.EscapeDataString(acc.Username)}&" +
-                             $"pass={Uri.EscapeDataString(acc.Password)}" +
-                             (!string.IsNullOrEmpty(token) ? $"&token={Uri.EscapeDataString(token)}" : "");
-
+                var pwd = Prompt("Mot de passe maître", "Entrez le mot de passe :");
+                if (pwd == null) Environment.Exit(0);
                 try
                 {
-                    Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+                    accounts = LoadAccounts(pwd);
+                    masterPassword = pwd;
+                    BindGrid();
+                    if (masterPassword != null && !File.Exists(dataPath))
+                        SaveAccounts(masterPassword);
                     return;
                 }
                 catch
                 {
-                    MessageBox.Show("Impossible d'ouvrir le navigateur.", "Erreur", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    return;
+                    attempts++;
                 }
             }
+            SecureErase(dataPath);
+            MessageBox.Show("Fichier effacé après 3 échecs.");
+            Environment.Exit(0);
+        }
+
+        private string? Prompt(string title, string msg)
+        {
+            using var f = new Form { Text = title, Width = 300, Height = 180, StartPosition = FormStartPosition.CenterParent, FormBorderStyle = FormBorderStyle.FixedDialog };
+            var l = new Label { Left = 20, Top = 20, Text = msg, AutoSize = true };
+            var t = new TextBox { Left = 20, Top = 50, Width = 200, UseSystemPasswordChar = true };
+            var showBtn = new Button { Text = "👁️", Left = 225, Top = 49, Width = 35, FlatStyle = FlatStyle.Popup };
+            var ok = new Button { Text = "OK", Left = 100, Top = 120, Width = 80 };
+            var cancel = new Button { Text = "Annuler", Left = 190, Top = 120, Width = 80 };
+
+            showBtn.MouseDown += (_, _) => t.UseSystemPasswordChar = false;
+            showBtn.MouseUp += (_, _) => t.UseSystemPasswordChar = true;
+
+            ok.Click += (_, _) => { f.DialogResult = DialogResult.OK; f.Close(); };
+            cancel.Click += (_, _) => { f.DialogResult = DialogResult.Cancel; f.Close(); };
+            t.KeyDown += (_, e) => { if (e.KeyCode == Keys.Enter) ok.PerformClick(); };
+
+            f.Controls.AddRange(new Control[] { l, t, showBtn, ok, cancel });
+            return f.ShowDialog() == DialogResult.OK ? t.Text : null;
+        }
+
+        private List<Account> LoadAccounts(string pwd)
+        {
+            if (!File.Exists(dataPath)) return new List<Account>();
+            var d = File.ReadAllBytes(dataPath);
+            using var ms = new MemoryStream(d);
+            using var r = new BinaryReader(ms);
+            var salt = r.ReadBytes(r.ReadInt32());
+            var enc = r.ReadBytes(r.ReadInt32());
+            var json = Decrypt(salt, enc, pwd);
+            return System.Text.Json.JsonSerializer.Deserialize<List<Account>>(json) ?? new List<Account>();
+        }
+
+        private void SaveAccounts(string pwd)
+        {
+            var json = System.Text.Json.JsonSerializer.Serialize(accounts);
+            var (salt, enc) = Encrypt(json, pwd);
+            using var ms = new MemoryStream();
+            using var w = new BinaryWriter(ms);
+            w.Write(salt.Length);
+            w.Write(salt);
+            w.Write(enc.Length);
+            w.Write(enc);
+            var data = ms.ToArray();
 
             try
             {
-                string template = @"
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset='utf-8'>
-    <title>Connexion cPanel</title>
-</head>
-<body>
-    <form id='loginForm' action='{0}' method='post'>
-        <input type='hidden' name='username' value='{1}'>
-        <input type='hidden' name='password' value='{2}'>
-        <input type='hidden' name='token' value=''>
-    </form>
-    <script>
-        setTimeout(() => {{
-            document.getElementById('loginForm').submit();
-        }}, 100);
-    </script>
-</body>
-</html>";
-
-                string loginUrl = acc.CpanelUrl.TrimEnd('/') + "/login/";
-                string html = string.Format(template,
-                    loginUrl,
-                    acc.Username.Replace("'", "&#x27;").Replace("\"", "&quot;"),
-                    acc.Password.Replace("'", "&#x27;").Replace("\"", "&quot;")
-                );
-
-                string tempFile = Path.Combine(Path.GetTempPath(), $"cpanel_login_{Guid.NewGuid()}.html");
-                File.WriteAllText(tempFile, html, Encoding.UTF8);
-
-                string fileUrl = $"file:///{tempFile.Replace("\\", "/")}";
-                Process.Start(new ProcessStartInfo(fileUrl) { UseShellExecute = true });
-
-                Task.Run(async () =>
+                if (File.Exists(dataPath))
                 {
-                    await Task.Delay(5000);
-                    try { File.Delete(tempFile); } catch { }
-                });
+                    File.SetAttributes(dataPath, FileAttributes.Normal);
+                    File.Delete(dataPath);
+                }
+                File.WriteAllBytes(dataPath, data);
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Erreur : {ex.Message}", "Échec", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show($"❌ Échec sauvegarde :\n{ex.Message}", "Erreur", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
 
-        protected override void OnFormClosed(FormClosedEventArgs e)
+        private static (byte[], byte[]) Encrypt(string t, string p)
         {
-            txtPassword.Text = "";
-            txtApiToken.Text = "";
-            base.OnFormClosed(e);
-        }
-    }
-
-    internal partial class PasswordDialog : Form
-    {
-        public string Password => txtPassword.Text;
-
-        public PasswordDialog()
-        {
-            InitializeComponent();
+            var salt = RandomNumberGenerator.GetBytes(16);
+            using var aes = Aes.Create();
+            aes.Key = DeriveKey(p, salt);
+            aes.GenerateIV();
+            using var ms = new MemoryStream();
+            ms.Write(aes.IV);
+            using (var cs = new CryptoStream(ms, aes.CreateEncryptor(), CryptoStreamMode.Write))
+            using (var sw = new StreamWriter(cs)) sw.Write(t);
+            return (salt, ms.ToArray());
         }
 
-        private void InitializeComponent()
+        private static string Decrypt(byte[] s, byte[] d, string p)
         {
-            this.txtPassword = new System.Windows.Forms.TextBox();
-            this.btnOK = new System.Windows.Forms.Button();
-            this.btnCancel = new System.Windows.Forms.Button();
-            this.label1 = new System.Windows.Forms.Label();
-            this.SuspendLayout();
-
-            this.label1.AutoSize = true;
-            this.label1.Location = new System.Drawing.Point(12, 9);
-            this.label1.Text = "Mot de passe maître :";
-            this.txtPassword.Location = new System.Drawing.Point(15, 40);
-            this.txtPassword.Size = new System.Drawing.Size(360, 23);
-            this.txtPassword.UseSystemPasswordChar = true;
-            this.btnOK.Location = new System.Drawing.Point(217, 80);
-            this.btnOK.Size = new System.Drawing.Size(75, 30);
-            this.btnOK.Text = "OK";
-            this.btnOK.DialogResult = System.Windows.Forms.DialogResult.OK;
-            this.btnCancel.Location = new System.Drawing.Point(298, 80);
-            this.btnCancel.Size = new System.Drawing.Size(75, 30);
-            this.btnCancel.Text = "Annuler";
-            this.btnCancel.DialogResult = System.Windows.Forms.DialogResult.Cancel;
-
-            this.AcceptButton = this.btnOK;
-            this.CancelButton = this.btnCancel;
-            this.ClientSize = new System.Drawing.Size(384, 122);
-            this.Controls.Add(this.label1);
-            this.Controls.Add(this.txtPassword);
-            this.Controls.Add(this.btnOK);
-            this.Controls.Add(this.btnCancel);
-            this.FormBorderStyle = System.Windows.Forms.FormBorderStyle.FixedDialog;
-            this.MaximizeBox = false;
-            this.MinimizeBox = false;
-            this.Text = "Sécurité";
-            this.ResumeLayout(false);
-            this.PerformLayout();
+            using var aes = Aes.Create();
+            aes.Key = DeriveKey(p, s);
+            var iv = new byte[16];
+            Buffer.BlockCopy(d, 0, iv, 0, 16);
+            aes.IV = iv;
+            using var ms = new MemoryStream(d, 16, d.Length - 16);
+            using var cs = new CryptoStream(ms, aes.CreateDecryptor(), CryptoStreamMode.Read);
+            using var sr = new StreamReader(cs);
+            return sr.ReadToEnd();
         }
 
-        private System.Windows.Forms.TextBox txtPassword;
-        private System.Windows.Forms.Button btnOK;
-        private System.Windows.Forms.Button btnCancel;
-        private System.Windows.Forms.Label label1;
+        private static byte[] DeriveKey(string p, byte[] s) => new Rfc2898DeriveBytes(p, s, 100000, HashAlgorithmName.SHA256).GetBytes(32);
+
+        private void SecureErase(string f)
+        {
+            if (!File.Exists(f)) return;
+            try
+            {
+                var len = new FileInfo(f).Length;
+                using var s = File.OpenWrite(f);
+                var b = new byte[1024];
+                for (int i = 0; i < 3; i++)
+                {
+                    RandomNumberGenerator.Fill(b);
+                    for (long w = 0; w < len; w += b.Length) s.Write(b, 0, (int)Math.Min(b.Length, len - w));
+                    s.Position = 0;
+                }
+            }
+            catch { }
+            File.Delete(f);
+        }
+
+        // ✅ BindGrid corrigé : tri visuel seulement
+        private void BindGrid()
+        {
+            var sorted = accounts.OrderBy(a => a.Client).ToList();
+            dgv.DataSource = new BindingSource(sorted, null);
+            dgv.ClearSelection();
+        }
+
+        private void SaveNew()
+        {
+            var url = txtUrl.Text.Trim();
+            if (string.IsNullOrWhiteSpace(url))
+            {
+                MessageBox.Show("URL obligatoire.");
+                return;
+            }
+            url = url.Replace(" ", "").ToLowerInvariant();
+            if (!url.StartsWith("https://"))
+            {
+                MessageBox.Show("URL doit commencer par https://");
+                return;
+            }
+
+            EnsurePassword();
+            if (string.IsNullOrEmpty(masterPassword)) return;
+
+            accounts.Add(new Account
+            {
+                Client = txtClient.Text.Trim(),
+                Url = url,
+                Username = txtUser.Text.Trim(),
+                Password = txtPass.Text.Trim(),
+                ApiToken = txtToken.Text.Trim()
+            });
+
+            // ✅ Tri persistant avant sauvegarde
+            accounts = accounts.OrderBy(a => a.Client).ToList();
+
+            SaveAccounts(masterPassword);
+            BindGrid();
+            Clear();
+            txtClient.Focus();
+
+            MessageBox.Show("✅ Compte enregistré.", "Succès", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        // ✅ UpdateSelected corrigé : modification partielle
+        private void UpdateSelected()
+        {
+            if (dgv.SelectedRows.Count == 0) return;
+
+            var row = dgv.SelectedRows[0];
+            var clientName = row.Cells["Client"].Value?.ToString();
+            var index = accounts.FindIndex(a => a.Client == clientName);
+            if (index == -1)
+            {
+                MessageBox.Show("Compte introuvable.", "Erreur", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // ✅ Mise à jour SÉLECTIVE
+            var account = accounts[index];
+            account.Client = txtClient.Text.Trim();
+            account.Url = txtUrl.Text.Trim().Replace(" ", "").ToLowerInvariant();
+            account.Username = txtUser.Text.Trim();
+            account.Password = txtPass.Text.Trim();
+            account.ApiToken = txtToken.Text.Trim();
+
+            // ✅ Validation URL
+            if (string.IsNullOrWhiteSpace(account.Url))
+            {
+                MessageBox.Show("URL obligatoire.");
+                return;
+            }
+            if (!account.Url.StartsWith("https://"))
+            {
+                MessageBox.Show("URL doit commencer par https://");
+                return;
+            }
+
+            EnsurePassword();
+            if (string.IsNullOrEmpty(masterPassword)) return;
+
+            // ✅ Tri persistant
+            accounts = accounts.OrderBy(a => a.Client).ToList();
+
+            SaveAccounts(masterPassword);
+            BindGrid();
+
+            // ✅ Re-sélectionner la ligne mise à jour
+            for (int i = 0; i < dgv.Rows.Count; i++)
+            {
+                if (dgv.Rows[i].Cells["Client"].Value?.ToString() == account.Client)
+                {
+                    dgv.ClearSelection();
+                    dgv.Rows[i].Selected = true;
+                    break;
+                }
+            }
+
+            MessageBox.Show("✅ Compte mis à jour.", "Succès", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        private void DeleteSelected()
+        {
+            if (dgv.SelectedRows.Count == 0) return;
+            if (MessageBox.Show("Supprimer ?", "Confirmer", MessageBoxButtons.YesNo) == DialogResult.Yes)
+            {
+                EnsurePassword();
+                if (string.IsNullOrEmpty(masterPassword)) return;
+
+                var row = dgv.SelectedRows[0];
+                var clientName = row.Cells["Client"].Value?.ToString();
+                var index = accounts.FindIndex(a => a.Client == clientName);
+                if (index != -1)
+                {
+                    accounts.RemoveAt(index);
+                }
+
+                // ✅ Tri persistant
+                accounts = accounts.OrderBy(a => a.Client).ToList();
+
+                SaveAccounts(masterPassword);
+                BindGrid();
+            }
+        }
+
+        private void EnsurePassword()
+        {
+            if (string.IsNullOrEmpty(masterPassword))
+            {
+                var pwd = Prompt("Mot de passe maître", "Mot de passe requis :");
+                if (pwd != null) masterPassword = pwd;
+            }
+        }
+
+        private void TestToken()
+        {
+            if (dgv.SelectedRows.Count == 0) return;
+            var a = accounts[dgv.SelectedRows[0].Index];
+            if (string.IsNullOrWhiteSpace(a.ApiToken))
+            {
+                MessageBox.Show("Pas de jeton");
+                return;
+            }
+            try
+            {
+                ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+                var req = WebRequest.Create($"{a.Url.TrimEnd('/')}/execute/SSL/list_certs");
+                req.Method = "POST";
+                req.Headers["Authorization"] = $"cpanel {a.Username}:{a.ApiToken}";
+                using var _ = req.GetResponse();
+                MessageBox.Show("✅ Jeton valide", "Succès", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch { MessageBox.Show("❌ Échec du test", "Erreur", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+        }
+
+        private void ConnectToAccount(Account a)
+        {
+            try
+            {
+                string url;
+                if (a.Url.Contains("o2switch", StringComparison.OrdinalIgnoreCase))
+                {
+                    url = $"{a.Url.TrimEnd('/')}/login/?user={Uri.EscapeDataString(a.Username)}&pass={Uri.EscapeDataString(a.Password)}" +
+                          (!string.IsNullOrEmpty(a.ApiToken) ? $"&token={Uri.EscapeDataString(a.ApiToken)}" : "");
+                }
+                else
+                {
+                    var html = $@"<html><body onload='document.f.submit()'><form name='f' method='post' action='{a.Url.TrimEnd('/')}/login/'><input type='hidden' name='user' value='{WebUtility.HtmlEncode(a.Username)}'/><input type='hidden' name='pass' value='{WebUtility.HtmlEncode(a.Password)}'/>{(string.IsNullOrEmpty(a.ApiToken) ? "" : $"<input type='hidden' name='token' value='{WebUtility.HtmlEncode(a.ApiToken)}'/>")}</form></body></html>";
+                    var f = Path.GetTempFileName() + ".html";
+                    File.WriteAllText(f, html);
+                    url = new Uri(f).AbsoluteUri;
+                }
+                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Impossible d’ouvrir : {ex.Message}", "Erreur", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // ✅ Effacement sécurisé à la fermeture
+        protected override void OnFormClosing(FormClosingEventArgs e)
+        {
+            if (masterPassword != null)
+            {
+                var arr = masterPassword.ToCharArray();
+                Array.Clear(arr, 0, arr.Length);
+                masterPassword = null;
+            }
+            txtPass.Text = txtToken.Text = ""; // ✅ Efface les champs sensibles
+            base.OnFormClosing(e);
+        }
     }
 }
