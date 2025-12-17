@@ -50,6 +50,19 @@ namespace ConnexionCpanel
             Font = new Font("Segoe UI", 9F);
             MinimumSize = new Size(850, 500);
 
+            // ✅ Raccourci Ctrl+N
+            this.KeyPreview = true;
+            this.KeyDown += (_, e) =>
+            {
+                if (e.Control && e.KeyCode == Keys.N)
+                {
+                    Clear();
+                    dgv.ClearSelection();
+                    txtClient.Focus();
+                    e.SuppressKeyPress = true;
+                }
+            };
+
             var inputPanel = new TableLayoutPanel { Dock = DockStyle.Top, Height = 120, RowCount = 2, ColumnCount = 3, Padding = new Padding(10) };
             inputPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
             inputPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.33F));
@@ -176,16 +189,19 @@ namespace ConnexionCpanel
             var btnPanel = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 40, Padding = new Padding(10, 5, 10, 5) };
 
             btnAdd = new Button { Text = "➕ Ajouter", Width = 100 };
+            var btnNew = new Button { Text = "✅ Nouveau", Width = 100 }; // ✅ Nouveau bouton
             btnUpdate = new Button { Text = "✏️ Modifier", Width = 100, Enabled = false };
             btnDelete = new Button { Text = "🗑️ Supprimer", Width = 100, Enabled = false };
             btnTest = new Button { Text = "🔍 Tester jeton", Width = 120, Enabled = false };
 
             btnAdd.Click += (_, _) => SaveNew();
+            btnNew.Click += (_, _) => { Clear(); dgv.ClearSelection(); txtClient.Focus(); }; // ✅ Action
             btnUpdate.Click += (_, _) => UpdateSelected();
             btnDelete.Click += (_, _) => DeleteSelected();
             btnTest.Click += (_, _) => TestToken();
 
-            foreach (var b in new[] { btnAdd, btnUpdate, btnDelete, btnTest })
+            // ✅ Ajout du bouton "Nouveau"
+            foreach (var b in new[] { btnAdd, btnNew, btnUpdate, btnDelete, btnTest })
                 btnPanel.Controls.Add(b);
 
             // ✅ SelectionChanged corrigé : remplissage automatique
@@ -203,10 +219,7 @@ namespace ConnexionCpanel
                     txtPass.Text = row.Cells["Password"].Value?.ToString() ?? "";
                     txtToken.Text = row.Cells["ApiToken"].Value?.ToString() ?? "";
                 }
-                else
-                {
-                    Clear();
-                }
+                // ❌ Pas de else Clear() → on garde les champs si on veut copier/modifier
             };
 
             var mainLayout = new TableLayoutPanel { Dock = DockStyle.Fill, RowCount = 3, ColumnCount = 1 };
